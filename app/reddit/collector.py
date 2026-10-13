@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import logging
+import os
+import praw
+
+from dotenv import load_dotenv
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from pydantic import ValidationError
 
 from app.models.schemas import RedditPost
-from app.reddit.client import RedditAuthError, RedditClientError, RedditRateLimitError
+from app.reddit.client import RedditAuthError, RedditClientError, RedditRateLimitError, RedditClient
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +32,7 @@ class CollectionResult:
     duplicates_removed: int = 0
     invalid_posts: int = 0
 
+load_dotenv()
 
 def _fingerprint(post: RedditPost) -> tuple[str, str]:
     """Identical title+body (or title+url for link posts) = obvious duplicate/crosspost."""
@@ -96,3 +101,59 @@ def collect(subreddits: list[str], limit: int, reddit_client: PostSource) -> Col
 def collect_posts(subreddits: list[str], limit: int, reddit_client: PostSource) -> list[RedditPost]:
     """Convenience wrapper returning only the de-duplicated posts."""
     return collect(subreddits, limit, reddit_client).posts
+
+def create_reddit_client():
+    """
+        Initializes and returns an authenticated PRAW Reddit client
+        using credentials securely loaded from environment variables.
+    """
+
+    try:
+        reddit = praw.Reddit(
+            client_id=os.environ["REDDIT_CLIENT_ID"],
+            client_secret=os.environ["REDDIT_CLIENT_SECRET"],
+            user_agent=os.environ["REDDIT_USER_AGENT"],
+            username=os.environ["REDDIT_USERNAME"],
+            password=os.environ["REDDIT_PASSWORD"],
+        )
+        print(f"Successfully connected to Reddit API. Read only mode {reddit.read_only}")
+        return reddit
+    except Exception as e:
+        print(f"Failed to connect to Reddit API {e}")
+        raise
+
+def fetch_subreddit_posts(reddit_client, subreddit_name, limit=10):
+    """
+        Retrieves recent posts from a specified subreddit matching functional requirements.
+    """
+    sub = reddit_client.subreddit(subreddit_name)
+    posts_data = []
+
+    #Fetching latest new subreddit submissions
+    for post in sub.new(limit=limit):
+        post_info = {
+            "id": post.id,
+            "title": post.title,
+            "description": post.selftext,
+            "subreddit": post.subreddit.display_name,
+            "author": str(post.author) if post.author else "[deleted]",
+            "creation_date": post.created_utc,
+            "original_post_url": f"https://reddit.com{post.permalink}",
+        }
+        posts_data.append(post_info)
+
+    return posts_data
+
+
+if __name__ == "__main__":
+    #Example execution
+    client = create_reddit_client()
+    raw_subreddits = os.environ.get("TARGET_SUBREDDIT", "legaladvice")
+    target_subreddits = [sub.strip() for sub in raw_subreddits.split(",")]
+
+    for sub_name in target_subreddits:
+        print(f"\nFetching posts for \r{sub_name}...")
+        posts = fetch_subreddit_posts(client, sub_name, limit=20)
+        for post in posts:
+            print(f"- [{post['id']} {post['title']} (Author: {post['author']})]")
+
